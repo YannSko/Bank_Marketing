@@ -1,1 +1,17 @@
- 
+mlflow:
+  tracking_uri: "http://127.0.0.1:5000"  # URI for MLflow tracking server
+  experiment_name: "bank_marketing_experiment"  # Default experiment name
+  models:
+    xgboost: 
+      description: "XGBoost model for bank marketing dataset"
+      registry: "bank_marketing_xgboost"
+    random_forest: 
+      description: "Random Forest model for bank marketing dataset"
+      registry: "bank_marketing_rf"
+    gradient_boosting: 
+      description: "Gradient Boosting model for bank marketing dataset"
+      registry: "bank_marketing_gb"
+  registry:
+    default_stage: "Production"  # Default stage for registered models
+    model_uri_format: "models:/<model_name>/<stage>"  # Example URI format for accessing models
+
