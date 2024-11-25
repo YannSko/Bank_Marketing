@@ -11,6 +11,8 @@ from sklearn.model_selection import GridSearchCV, StratifiedKFold
 from skopt import BayesSearchCV
 import matplotlib.pyplot as plt
 import seaborn as sns
+import yaml
+from mlflow_config import MLflowConfig
 
 # Configure logging
 logging.basicConfig(
@@ -22,20 +24,12 @@ logging.basicConfig(
     ]
 )
 
-class MLflowConfig:
+def load_config(config_path):
     """
-    A class to manage MLflow configuration.
+    Load configuration from a YAML file.
     """
-    def __init__(self, tracking_uri, experiment_name):
-        self.tracking_uri = tracking_uri
-        self.experiment_name = experiment_name
-
-    def initialize(self):
-        """
-        Initialize MLflow with the specified tracking URI and experiment name.
-        """
-        mlflow.set_tracking_uri(self.tracking_uri)
-        mlflow.set_experiment(self.experiment_name)
+    with open(config_path, "r") as file:
+        return yaml.safe_load(file)
 
 def load_data(train_path, test_path):
     """
@@ -91,18 +85,16 @@ def plot_and_log_metrics(y_true, y_pred, model_name):
         logging.error(f"Error plotting metrics: {e}")
         raise
 
-def hyperparameter_search(
-    X_train,
-    y_train,
-    model_type="xgboost",
-    search_method="grid",
-    param_grid=None,
-    cv_splits=3
-):
+def hyperparameter_search(X_train, y_train, config):
     """
-    Perform hyperparameter tuning using Grid Search or Bayesian Search.
+    Perform hyperparameter tuning based on the configuration.
     """
     try:
+        model_type = config["model"]["type"]
+        search_method = config["search"]["method"]
+        param_grid = config["search"]["param_grid"]
+        cv_splits = config["search"]["cv_splits"]
+
         if model_type == "xgboost":
             model = XGBClassifier(use_label_encoder=False, eval_metric="logloss", random_state=42)
         elif model_type == "random_forest":
@@ -144,102 +136,57 @@ def hyperparameter_search(
         logging.error(f"Error during hyperparameter tuning: {e}")
         raise
 
-def train_and_log_model(
-    X_train,
-    y_train,
-    X_test,
-    y_test,
-    model_type="xgboost",
-    use_tuning=False,
-    search_method="grid",
-    param_grid=None,
-    params=None,
-    custom_model=None,
-    mlflow_config=None
-):
+def train_and_log_model(X_train, y_train, X_test, y_test, config):
     """
     Train and log a model using MLflow.
     """
     try:
-        if mlflow_config:
-            mlflow_config.initialize()
+        mlflow_config = MLflowConfig(config["mlflow"]["tracking_uri"], config["mlflow"]["experiment_name"])
+        mlflow_config.initialize()
+
+        model_type = config["model"]["type"]
+        use_tuning = config["search"]["use_tuning"]
+        param_grid = config["search"]["param_grid"]
 
         with mlflow.start_run():
-            if custom_model:
-                best_model = custom_model
-                logging.info(f"Using custom model: {custom_model}")
-                params_to_log = best_model.get_params()
-            elif use_tuning:
-                best_model, best_params = hyperparameter_search(X_train, y_train, model_type, search_method, param_grid)
+            if use_tuning:
+                best_model, best_params = hyperparameter_search(X_train, y_train, config)
                 params_to_log = best_params
             else:
                 if model_type == "xgboost":
-                    best_model = XGBClassifier(use_label_encoder=False, eval_metric="logloss", random_state=42, **(params or {}))
+                    best_model = XGBClassifier(use_label_encoder=False, eval_metric="logloss", random_state=42, **param_grid)
                 elif model_type == "random_forest":
-                    best_model = RandomForestClassifier(random_state=42, **(params or {}))
+                    best_model = RandomForestClassifier(random_state=42, **param_grid)
                 elif model_type == "gradient_boosting":
-                    best_model = GradientBoostingClassifier(random_state=42, **(params or {}))
+                    best_model = GradientBoostingClassifier(random_state=42, **param_grid)
                 else:
                     raise ValueError(f"Unsupported model type: {model_type}")
 
-                logging.info(f"Training {model_type} model with direct parameters...")
                 best_model.fit(X_train, y_train)
-                params_to_log = params
+                params_to_log = param_grid
 
-            logging.info("Evaluating the model...")
+            # Evaluate and log metrics
             y_pred = best_model.predict(X_test)
             accuracy = accuracy_score(y_test, y_pred)
             f1 = f1_score(y_test, y_pred)
             roc_auc = roc_auc_score(y_test, y_pred)
 
-            mlflow.log_param("model_type", model_type)
             mlflow.log_params(params_to_log)
-            mlflow.log_metric("accuracy", accuracy)
-            mlflow.log_metric("f1_score", f1)
-            mlflow.log_metric("roc_auc", roc_auc)
+            mlflow.log_metrics({"accuracy": accuracy, "f1_score": f1, "roc_auc": roc_auc})
 
-            logging.info("Logging the model to MLflow...")
+            # Log model
             mlflow.sklearn.log_model(best_model, artifact_path="model")
 
+            # Plot and log metrics
             plot_and_log_metrics(y_test, y_pred, model_type)
-
-            logging.info(f"Accuracy: {accuracy:.4f}")
-            logging.info(f"F1 Score: {f1:.4f}")
-            logging.info(f"ROC AUC: {roc_auc:.4f}")
-            logging.info("\nClassification Report:\n" + classification_report(y_test, y_pred))
 
             return best_model, {"accuracy": accuracy, "f1_score": f1, "roc_auc": roc_auc}
 
     except Exception as e:
-        logging.error(f"Error during model training and logging: {e}")
+        logging.error(f"Error during training and logging: {e}")
         raise
 
 if __name__ == "__main__":
-    # Paths to preprocessed data
-    train_data_path = "./data/processed/engineered_train_data.csv"
-    test_data_path = "./data/processed/engineered_test_data.csv"
-
-    # Load the data
-    X_train, X_test, y_train, y_test = load_data(train_data_path, test_data_path)
-
-    # Initialize MLflowConfig
-    mlflow_config = MLflowConfig(tracking_uri="./mlruns", experiment_name="bank_marketing_experiment")
-
-    # Example: Train XGBoost directly with specific parameters
-    direct_params = {
-        "max_depth": 10,
-        "learning_rate": 0.1,
-        "n_estimators": 150,
-        "colsample_bytree": 0.8
-    }
-
-    train_and_log_model(
-        X_train,
-        y_train,
-        X_test,
-        y_test,
-        model_type="xgboost",
-        use_tuning=False,
-        params=direct_params,
-        mlflow_config=mlflow_config
-    )
+    config = load_config("config.yaml")
+    X_train, X_test, y_train, y_test = load_data(config["data"]["train_path"], config["data"]["test_path"])
+    train_and_log_model(X_train, y_train, X_test, y_test, config)
